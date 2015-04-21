@@ -102,7 +102,7 @@ func Run() {
 			ShortName: "m",
 			Usage:     "manage a docker cluster",
 			Flags: []cli.Flag{
-				flStore,
+				flStore, flCluster,
 				flStrategy, flFilter,
 				flHosts,
 				flTLS, flTLSCaCert, flTLSCert, flTLSKey, flTLSVerify,

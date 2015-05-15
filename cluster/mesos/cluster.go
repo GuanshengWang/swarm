@@ -1,6 +1,7 @@
 package mesos
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -31,9 +32,10 @@ type Cluster struct {
 	eventHandler cluster.EventHandler
 	slaves       map[string]*slave
 	scheduler    *scheduler.Scheduler
-	options      *cluster.Options
+	options      *cluster.DriverOpts
 	store        *state.Store
-
+	TLSConfig    *tls.Config
+	master       string
 	pendingTasks *queue
 }
 
@@ -45,14 +47,16 @@ var (
 )
 
 // NewCluster for mesos Cluster creation
-func NewCluster(scheduler *scheduler.Scheduler, store *state.Store, options *cluster.Options) cluster.Cluster {
+func NewCluster(scheduler *scheduler.Scheduler, store *state.Store, TLSConfig *tls.Config, dflag string, options cluster.DriverOpts) (cluster.Cluster, error) {
 	log.WithFields(log.Fields{"name": "mesos"}).Debug("Initializing cluster")
 
 	cluster := &Cluster{
 		slaves:    make(map[string]*slave),
 		scheduler: scheduler,
-		options:   options,
+		options:   &options,
 		store:     store,
+		master:    dflag,
+		TLSConfig: TLSConfig,
 	}
 
 	cluster.pendingTasks = &queue{c: cluster}
@@ -63,11 +67,11 @@ func NewCluster(scheduler *scheduler.Scheduler, store *state.Store, options *clu
 	driverConfig := mesosscheduler.DriverConfig{
 		Scheduler: cluster,
 		Framework: &mesosproto.FrameworkInfo{Name: &frameworkName, User: &user},
-		Master:    options.Discovery,
+		Master:    cluster.master,
 	}
 
 	// Changing port for https
-	if options.TLSConfig != nil {
+	if cluster.TLSConfig != nil {
 		dockerDaemonPort = "2376"
 	}
 
@@ -79,7 +83,7 @@ func NewCluster(scheduler *scheduler.Scheduler, store *state.Store, options *clu
 		bindingPort, err := strconv.ParseUint(bindingPortEnv, 0, 16)
 		if err != nil {
 			log.Errorf("Unable to parse SWARM_MESOS_PORT, error: %s", err)
-			return nil
+			return nil, err
 		}
 		driverConfig.BindingPort = uint16(bindingPort)
 	}
@@ -89,14 +93,15 @@ func NewCluster(scheduler *scheduler.Scheduler, store *state.Store, options *clu
 		bindingAddress := net.ParseIP(bindingAddressEnv)
 		if bindingAddress == nil {
 			log.Error("Unable to parse SWARM_MESOS_ADDRESS")
-			return nil
+			// TODO return proper error
+			return nil, nil
 		}
 		driverConfig.BindingAddress = bindingAddress
 	}
 
 	driver, err := mesosscheduler.NewMesosSchedulerDriver(driverConfig)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	cluster.driver = driver
@@ -104,11 +109,11 @@ func NewCluster(scheduler *scheduler.Scheduler, store *state.Store, options *clu
 	status, err := driver.Start()
 	if err != nil {
 		log.Debugf("Mesos driver started, status/err %v: %v", status, err)
-		return nil
+		return nil, err
 	}
 	log.Debugf("Mesos driver started, status %v", status)
 
-	return cluster
+	return cluster, nil
 }
 
 // RegisterEventHandler registers an event handler.
@@ -343,7 +348,7 @@ func (c *Cluster) ResourceOffers(_ mesosscheduler.SchedulerDriver, offers []*mes
 		s, ok := c.slaves[slaveID]
 		if !ok {
 			engine := cluster.NewEngine(*offer.Hostname+":"+dockerDaemonPort, 0)
-			if err := engine.Connect(c.options.TLSConfig); err != nil {
+			if err := engine.Connect(c.TLSConfig); err != nil {
 				log.Error(err)
 			} else {
 				s = newSlave(slaveID, engine)
